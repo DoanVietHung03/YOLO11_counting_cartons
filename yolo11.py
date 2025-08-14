@@ -2,69 +2,74 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import numpy as np 
-import os
 import cv2
-from ultralytics import YOLO
-from supervision import ByteTrack, Detections
+from ultralytics import YOLO  # Detection Model
+from supervision import ByteTrack, Detections # Tracking method
 from datetime import datetime
 import time
 import threading
 import queue
-from mySQL_db import db_insert
+from mySQL_db import db_insert # Save data to db
 
+#========USING GPU IF AVAILABLE=======#
 import torch
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-
-#========CONFIG==========#
-RTSP_URL = "rtsp://10.6.18.5:46458/mystream2"
-CONF_THRESHOLD = 0.5
-MOVE_THRESHOLD = 5
-MIN_LIFETIME = 3
-
-total_count = 0
-
+#========SET UP ENV FOR RTSP STREAM (USING TCP)==========#
+import os
 os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
 
-# Hàng đợi để chứa các frame đã đọc
-frame_queue = queue.Queue(maxsize=128)
+
+#========CONFIG VARIABLES==========#
+RTSP_URL = "rtsp://10.6.18.5:46458/mystream" # RTSP stream URL
+CONF_THRESHOLD = 0.5 # Confidence threshold for detections
+MOVE_THRESHOLD = 5 # Threshold for movement detection (move at least 5 pixels)
+MIN_LIFETIME = 3 # Minimum lifetime of a track (in frames)
+
+total_count = 0 # Total count of detected objects
+
 
 #========MODEL LOADING========#
-best_model_path = os.path.join('D:/Test/best.pt')
-best_model = YOLO(best_model_path).to(device)
+best_model = YOLO('D:/Test/best.pt').to(device)
 
-#========VIDEO READING FOR FPS========#
+
+#========STREAM READING FOR FPS========#
 cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
 fps = cap.get(cv2.CAP_PROP_FPS)
 
+#========TRACKING (USING BYTETRACK)========#
+tracker = ByteTrack(frame_rate=int(fps), lost_track_buffer=100)
+track_memory = {}       # Store information for each track_id
+frame_idx = 0
+
+#=======FRAME READING USING THREAD========#
+# Queue to store frames
+frame_queue = queue.Queue(maxsize=128)
+
+# Thread to read frames from the RTSP stream
 def frame_reader(rtsp_url, q):
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
-        print("Lỗi trong thread: Không thể mở stream")
+        print("Thread error: Unable to open stream")
         return
 
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Thread đọc frame bị lỗi hoặc kết thúc.")
-            break
-        # Nếu hàng đợi chưa đầy, thêm frame vào
+            print("Thread error: Failed to read frame or stream ended.")
+            break                                                           
+        # If frame is read successfully and queue is not full, add it to the queue
         if not q.full():
             q.put(frame)
     cap.release()
 
-#========TRACKING========#
-tracker = ByteTrack(frame_rate=int(fps), lost_track_buffer=100)
-track_memory = {}       # Lưu thông tin của từng track_id
-frame_idx = 0
-
-# Khởi tạo và bắt đầu thread đọc frame
+# Start the frame reader thread 
 reader_thread = threading.Thread(target=frame_reader, args=(RTSP_URL, frame_queue))
 reader_thread.daemon = True # Thread sẽ tự tắt khi chương trình chính kết thúc
 reader_thread.start()
 
+#========STREAM PROCESSING========#
 while True:
     # Read frame from queue
     if not frame_queue.empty():
@@ -72,7 +77,7 @@ while True:
 
         frame_idx += 1
 
-        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         # Resize frame if needed
         h, w = frame.shape[:2]
