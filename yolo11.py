@@ -10,171 +10,203 @@ import time
 import threading
 import queue
 from mySQL_db import db_insert # Save data to db
+import logging
+import torch
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 #========USING GPU IF AVAILABLE=======#
-import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 #========SET UP ENV FOR RTSP STREAM (USING TCP)==========#
 import os
 os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
 
-
 #========CONFIG VARIABLES==========#
-RTSP_URL = "rtsp://10.6.18.5:46458/mystream" # RTSP stream URL
-CONF_THRESHOLD = 0.5 # Confidence threshold for detections
-MOVE_THRESHOLD = 5 # Threshold for movement detection (move at least 5 pixels)
-MIN_LIFETIME = 3 # Minimum lifetime of a track (in frames)
+CONFIG = {
+    "RTSP_URL": "rtsp://10.6.18.5:46458/mystream",
+    "MODEL_PATH": "D:/Test/best.pt",
+    "CONF_THRESHOLD": 0.5,
+    "MOVE_THRESHOLD": 5,
+    "MIN_LIFETIME": 3,
+    "QUEUE_SIZE": 128,
+    "LOST_TRACK_BUFFER": 50,
+    "BATCH_SIZE": 10,  # For database insertions
+    "FRAME_SKIP": 1,  # Process every Nth frame (1 = no skip)
+    "RESIZE_PERCENT": 60,
+    "CLASS_ID": 1  # Assuming stamp class_id = 1
+}
 
 total_count = 0 # Total count of detected objects
 
-
 #========MODEL LOADING========#
-best_model = YOLO('D:/Test/best.pt').to(device)
-
+best_model = YOLO(CONFIG["MODEL_PATH"]).to(device)
+try:
+    best_model.model.half()  # Enable FP16 inference if supported
+except:
+    logger.warning("Mixed precision not supported on this device.")
 
 #========STREAM READING FOR FPS========#
-cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+cap = cv2.VideoCapture(CONFIG["RTSP_URL"], cv2.CAP_FFMPEG)
 fps = cap.get(cv2.CAP_PROP_FPS)
+cap.release()  # Release this cap as we'll use threaded reader
 
 #========TRACKING (USING BYTETRACK)========#
-tracker = ByteTrack(frame_rate=int(fps), lost_track_buffer=100)
+tracker = ByteTrack(frame_rate=int(fps), lost_track_buffer=CONFIG["LOST_TRACK_BUFFER"])
 track_memory = {}       # Store information for each track_id
 frame_idx = 0
 
 #=======FRAME READING USING THREAD========#
 # Queue to store frames
-frame_queue = queue.Queue(maxsize=128)
+frame_queue = queue.Queue(maxsize=CONFIG["QUEUE_SIZE"])
 
-# Thread to read frames from the RTSP stream
+# Thread to read frames from the RTSP stream with reconnection
 def frame_reader(rtsp_url, q):
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        print("Thread error: Unable to open stream")
-        return
-
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Thread error: Failed to read frame or stream ended.")
-            break                                                           
-        # If frame is read successfully and queue is not full, add it to the queue
-        if not q.full():
+        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            logger.error("Unable to open stream, retrying in 5 seconds...")
+            time.sleep(5)
+            continue
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logger.error("Stream disconnected, reconnecting...")
+                break
+            # Resize in the reader thread
+            h, w = frame.shape[:2]
+            h = h * CONFIG["RESIZE_PERCENT"] // 100
+            w = w * CONFIG["RESIZE_PERCENT"] // 100
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+            if q.full():
+                logger.warning("Frame queue is full, skipping oldest frame to avoid lag.")
+                q.get()  # Remove oldest frame
             q.put(frame)
-    cap.release()
+        cap.release()
 
 # Start the frame reader thread 
-reader_thread = threading.Thread(target=frame_reader, args=(RTSP_URL, frame_queue))
-reader_thread.daemon = True # Thread sẽ tự tắt khi chương trình chính kết thúc
+reader_thread = threading.Thread(target=frame_reader, args=(CONFIG["RTSP_URL"], frame_queue))
+reader_thread.daemon = True
 reader_thread.start()
 
-#========STREAM PROCESSING========#
-while True:
-    # Read frame from queue
-    if not frame_queue.empty():
-        frame = frame_queue.get()
+# Modular function for processing detections and tracking
+def process_frame(frame, model, tracker, track_memory, frame_idx, w, h, batch_detections):
+    with torch.no_grad():
+        results = model(frame, verbose=False, conf=0.7)[0]
+    detections = Detections.from_ultralytics(results)
+    tracked = tracker.update_with_detections(detections)
+    current_ids = set()
 
+    for i in range(len(tracked)):
+        x1, y1, x2, y2 = map(int, tracked.xyxy[i])
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
+        track_id = int(tracked.tracker_id[i])
+        class_id = int(tracked.class_id[i])
+        confidence = float(tracked.confidence[i])
+
+        current_ids.add(track_id)
+
+        # Only process specific class
+        if class_id != CONFIG["CLASS_ID"] or confidence < CONFIG["CONF_THRESHOLD"]:
+            if track_id in track_memory:
+                track_memory[track_id]['last_seen'] = frame_idx
+            continue
+
+        #=======TRACK MEMORY UPDATE=======#
+        if track_id not in track_memory:
+            track_memory[track_id] = {
+                "cx": cx, "cy": cy,
+                "prev_cx": cx, "prev_cy": cy,
+                "lifetime": 1,
+                "counted": False,
+                "passed_vertical": False,
+                'last_seen': frame_idx
+            }
+        else:
+            prev_cx = track_memory[track_id]["prev_cx"]
+            prev_cy = track_memory[track_id]["prev_cy"]
+            lifetime = track_memory[track_id]["lifetime"]
+
+            moved_enough = abs(prev_cx - cx) >= CONFIG["MOVE_THRESHOLD"] or abs(prev_cy - cy) >= CONFIG["MOVE_THRESHOLD"]
+            crossed_vertical = (prev_cx < int(w/2 + 5) and cx >= int(w/2 + 5) or prev_cx >= int(w/2 + 5) and cx < int(w/2 + 5))
+            in_vertical_y_range = (cy >= int(h * 1/6) and cy <= int(h * 5/6))
+
+            # Count when conditions met
+            if lifetime >= CONFIG["MIN_LIFETIME"] and not track_memory[track_id]["counted"] and moved_enough and crossed_vertical and in_vertical_y_range and not track_memory[track_id]["passed_vertical"]:
+                global total_count
+                total_count += 1
+                track_memory[track_id]["counted"] = True
+                track_memory[track_id]["passed_vertical"] = True
+
+                # Prepare for batch insert
+                frame_detections = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "track_id": track_id,
+                    "label": results.names[class_id],
+                    "confidence": round(confidence, 3),
+                    "bbox": [x1, y1, x2, y2]
+                }
+                batch_detections.append(frame_detections)
+
+            # Update coordinates
+            track_memory[track_id]["prev_cx"] = track_memory[track_id]["cx"]
+            track_memory[track_id]["prev_cy"] = track_memory[track_id]["cy"]
+            track_memory[track_id]["cx"] = cx
+            track_memory[track_id]["cy"] = cy
+            track_memory[track_id]["lifetime"] += 1
+            track_memory[track_id]["last_seen"] = frame_idx
+
+        #=======DRAW=======#
+        label = f"{results.names[class_id]} {track_id}: {confidence:.2f}"
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    return tracked, current_ids, batch_detections
+
+#========STREAM PROCESSING========#
+batch_detections = []
+show_visuals = True
+while True:
+    if not frame_queue.empty():
+        start_time = time.time()
+        frame = frame_queue.get()
+        h, w = frame.shape[:2]
         frame_idx += 1
 
-        # frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # Frame skipping for detection
+        if frame_idx % CONFIG["FRAME_SKIP"] == 0:
+            tracked, current_ids, batch_detections = process_frame(frame, best_model, tracker, track_memory, frame_idx, w, h, batch_detections)
+        else:
+            # On skipped frames, update tracker with empty detections
+            detections = Detections.empty()
+            tracked = tracker.update_with_detections(detections)
+            current_ids = set()
 
-        # Resize frame if needed
-        h, w = frame.shape[:2]
-        h = h * 60 // 100
-        w = w * 60 // 100
-        frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+        # Clean up old tracks
+        track_memory = {tid: m for tid, m in track_memory.items() if frame_idx - m.get('last_seen', frame_idx) <= CONFIG["LOST_TRACK_BUFFER"] * 2}
 
-        #=======DETECTION=======#
-        results = best_model(frame, verbose=False, conf=0.7)[0]
-        detections = Detections.from_ultralytics(results)
-
-        #=======TRACKING=======#
-        tracked = tracker.update_with_detections(detections)
-
-        # ID hiện tại trong frame
-        current_ids = set()
-
-        for i in range(len(tracked)):
-            x1, y1, x2, y2 = map(int, tracked.xyxy[i])
-            cx = int((x1 + x2) / 2)
-            cy = int((y1 + y2) / 2)
-            track_id = int(tracked.tracker_id[i])
-            class_id = int(tracked.class_id[i])
-            confidence = float(tracked.confidence[i])
-
-            current_ids.add(track_id)
-
-            # Chỉ xử lý class stamp (giả sử class_id = 1)
-            if class_id != 1 or confidence < CONF_THRESHOLD:
-                # still update last_seen for this track
-                if track_id in track_memory:
-                    track_memory[track_id]['last_seen'] = frame_idx
-                    continue
-
-            #=======TRACK MEMORY UPDATE=======#
-            if track_id not in track_memory:
-                track_memory[track_id] = {
-                    "cx": cx, "cy": cy,
-                    "prev_cx": cx, "prev_cy": cy,
-                    "lifetime": 1,
-                    "counted": False,
-                    "passed_vertical": False,
-                    'last_seen': frame_idx
-                }
-            else:
-                prev_cx = track_memory[track_id]["prev_cx"]
-                prev_cy = track_memory[track_id]["prev_cy"]
-                lifetime = track_memory[track_id]["lifetime"]
-
-                moved_enough = abs(prev_cx - cx) >= MOVE_THRESHOLD or abs(prev_cy - cy) >= MOVE_THRESHOLD
-                crossed_vertical = (prev_cx < int(w/2 + 5) and cx >= int(w/2 + 5) or prev_cx >= int(w/2 + 5) and cx < int(w/2 + 5))
-                in_vertical_y_range = (cy >= int(h * 1/6) and cy <= int(h * 5/6))
-
-                # Đếm khi đủ tuổi thọ, di chuyển, và qua vạch
-                if lifetime >= MIN_LIFETIME and not track_memory[track_id]["counted"] and moved_enough and crossed_vertical and in_vertical_y_range and not track_memory[track_id]["passed_vertical"]:
-                    total_count += 1
-                    track_memory[track_id]["counted"] = True
-                    track_memory[track_id]["passed_vertical"] = True
-
-                    #=======SAVE DETECTION=======#
-                    frame_detections = {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "track_id": track_id,
-                        "label": results.names[class_id],
-                        "confidence": round(confidence, 3),
-                        "bbox": [x1, y1, x2, y2]
-                    }
-
-                    # Chỉ insert khi có detection mới
-                    if frame_detections:
-                        db_insert([frame_detections])
-
-                # Cập nhật toạ độ
-                track_memory[track_id]["prev_cx"] = track_memory[track_id]["cx"]
-                track_memory[track_id]["prev_cy"] = track_memory[track_id]["cy"]
-                track_memory[track_id]["cx"] = cx
-                track_memory[track_id]["cy"] = cy
-                track_memory[track_id]["lifetime"] += 1
-                track_memory[track_id]["last_seen"] = frame_idx
-
-            #=======DRAW=======#
-            label = f"{results.names[class_id]} {track_id}: {confidence:.2f}"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        # Xoá track_id không còn trong frame
-        track_memory = {tid: m for tid, m in track_memory.items() if frame_idx - m.get('last_seen', frame_idx) <= 100}
-
-        # Vẽ vạch kiểm tra
-        cv2.line(frame, (int(w/2), int(h * 1/6)), (int(w/2), int(h * 5/6)), (0, 255, 255), 3)
-        # Hiển thị tổng count
-        cv2.putText(frame, f"Total Count: {total_count}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
+        # Draw counting line and total count if visuals enabled
+        if show_visuals:
+            cv2.line(frame, (int(w/2), int(h * 1/6)), (int(w/2), int(h * 5/6)), (0, 255, 255), 3)
+            cv2.putText(frame, f"Total Count: {total_count}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 3)
 
         # Show frame
         cv2.imshow("RTSP Live Detection", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
 
-cap.release()
+        # Toggle visuals with 'v', quit with 'q'
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('v'):
+            show_visuals = not show_visuals
+
+        # Batch insert to database
+        if len(batch_detections) >= CONFIG["BATCH_SIZE"] or frame_idx % 100 == 0:
+            if batch_detections:
+                db_insert(batch_detections)
+                batch_detections = []
+
 cv2.destroyAllWindows()
