@@ -45,8 +45,8 @@ total_count = 0 # Total count of detected objects
 best_model = YOLO(CONFIG["MODEL_PATH"]).to(device)
 try:
     best_model.model.half()  # Enable FP16 inference if supported
-except:
-    logger.warning("Mixed precision not supported on this device.")
+except Exception as e:
+    logger.warning(f"Mixed precision not supported on this device: {e}")
 
 #========STREAM READING FOR FPS========#
 cap = cv2.VideoCapture(CONFIG["RTSP_URL"], cv2.CAP_FFMPEG)
