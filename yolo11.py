@@ -80,8 +80,6 @@ while True:
         w = w * 60 // 100
         frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
-        frame_detections = []  # Reset mỗi vòng
-
         #=======DETECTION=======#
         results = best_model(frame, verbose=False, conf=0.7)[0]
         detections = Detections.from_ultralytics(results)
@@ -134,6 +132,19 @@ while True:
                     track_memory[track_id]["counted"] = True
                     track_memory[track_id]["passed_vertical"] = True
 
+                    #=======SAVE DETECTION=======#
+                    frame_detections = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "track_id": track_id,
+                        "label": results.names[class_id],
+                        "confidence": round(confidence, 3),
+                        "bbox": [x1, y1, x2, y2]
+                    }
+
+                    # Chỉ insert khi có detection mới
+                    if frame_detections:
+                        db_insert([frame_detections])
+
                 # Cập nhật toạ độ
                 track_memory[track_id]["prev_cx"] = track_memory[track_id]["cx"]
                 track_memory[track_id]["prev_cy"] = track_memory[track_id]["cy"]
@@ -147,15 +158,6 @@ while True:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            #=======SAVE DETECTION=======#
-            frame_detections.append({
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "track_id": track_id,
-                "label": results.names[class_id],
-                "confidence": round(confidence, 3),
-                "bbox": [x1, y1, x2, y2]
-            })
-
         # Xoá track_id không còn trong frame
         track_memory = {tid: m for tid, m in track_memory.items() if frame_idx - m.get('last_seen', frame_idx) <= 100}
 
@@ -168,16 +170,6 @@ while True:
         cv2.imshow("RTSP Live Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-
-        # Save stream to file
-        # if 'out' not in globals():
-        #     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        #     out = cv2.VideoWriter('output.mp4', fourcc, fps, (w, h))
-        # out.write(frame)
-
-        # Chỉ insert khi có detection mới
-        if frame_detections:
-            db_insert(frame_detections)
 
 cap.release()
 cv2.destroyAllWindows()
