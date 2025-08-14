@@ -92,6 +92,48 @@ reader_thread.daemon = True
 reader_thread.start()
 
 # Modular function for processing detections and tracking
+def update_track_memory(track_id, cx, cy, class_id, confidence, frame_idx, w, h, track_memory, batch_detections, results):
+    global total_count
+    if track_id not in track_memory:
+        track_memory[track_id] = {
+            "cx": cx, "cy": cy,
+            "prev_cx": cx, "prev_cy": cy,
+            "lifetime": 1,
+            "counted": False,
+            "passed_vertical": False,
+            'last_seen': frame_idx
+        }
+    else:
+        prev_cx = track_memory[track_id]["prev_cx"]
+        prev_cy = track_memory[track_id]["prev_cy"]
+        lifetime = track_memory[track_id]["lifetime"]
+
+        moved_enough = abs(prev_cx - cx) >= CONFIG["MOVE_THRESHOLD"] or abs(prev_cy - cy) >= CONFIG["MOVE_THRESHOLD"]
+        crossed_vertical = (prev_cx < int(w/2 + 5) and cx >= int(w/2 + 5) or prev_cx >= int(w/2 + 5) and cx < int(w/2 + 5))
+        in_vertical_y_range = (cy >= int(h * 1/6) and cy <= int(h * 5/6))
+
+        if lifetime >= CONFIG["MIN_LIFETIME"] and not track_memory[track_id]["counted"] and moved_enough and crossed_vertical and in_vertical_y_range and not track_memory[track_id]["passed_vertical"]:
+            total_count += 1
+            track_memory[track_id]["counted"] = True
+            track_memory[track_id]["passed_vertical"] = True
+
+            frame_detections = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "track_id": track_id,
+                "label": results.names[class_id],
+                "confidence": round(confidence, 3),
+                "bbox": [int(prev_cx), int(prev_cy), int(cx), int(cy)]
+            }
+            batch_detections.append(frame_detections)
+
+        track_memory[track_id]["prev_cx"] = track_memory[track_id]["cx"]
+        track_memory[track_id]["prev_cy"] = track_memory[track_id]["cy"]
+        track_memory[track_id]["cx"] = cx
+        track_memory[track_id]["cy"] = cy
+        track_memory[track_id]["lifetime"] += 1
+        track_memory[track_id]["last_seen"] = frame_idx
+    return batch_detections
+
 def process_frame(frame, model, tracker, track_memory, frame_idx, w, h, batch_detections):
     with torch.no_grad():
         results = model(frame, verbose=False, conf=0.7)[0]
@@ -109,57 +151,15 @@ def process_frame(frame, model, tracker, track_memory, frame_idx, w, h, batch_de
 
         current_ids.add(track_id)
 
-        # Only process specific class
         if class_id != CONFIG["CLASS_ID"] or confidence < CONFIG["CONF_THRESHOLD"]:
             if track_id in track_memory:
                 track_memory[track_id]['last_seen'] = frame_idx
             continue
 
-        #=======TRACK MEMORY UPDATE=======#
-        if track_id not in track_memory:
-            track_memory[track_id] = {
-                "cx": cx, "cy": cy,
-                "prev_cx": cx, "prev_cy": cy,
-                "lifetime": 1,
-                "counted": False,
-                "passed_vertical": False,
-                'last_seen': frame_idx
-            }
-        else:
-            prev_cx = track_memory[track_id]["prev_cx"]
-            prev_cy = track_memory[track_id]["prev_cy"]
-            lifetime = track_memory[track_id]["lifetime"]
+        batch_detections = update_track_memory(
+            track_id, cx, cy, class_id, confidence, frame_idx, w, h, track_memory, batch_detections, results
+        )
 
-            moved_enough = abs(prev_cx - cx) >= CONFIG["MOVE_THRESHOLD"] or abs(prev_cy - cy) >= CONFIG["MOVE_THRESHOLD"]
-            crossed_vertical = (prev_cx < int(w/2 + 5) and cx >= int(w/2 + 5) or prev_cx >= int(w/2 + 5) and cx < int(w/2 + 5))
-            in_vertical_y_range = (cy >= int(h * 1/6) and cy <= int(h * 5/6))
-
-            # Count when conditions met
-            if lifetime >= CONFIG["MIN_LIFETIME"] and not track_memory[track_id]["counted"] and moved_enough and crossed_vertical and in_vertical_y_range and not track_memory[track_id]["passed_vertical"]:
-                global total_count
-                total_count += 1
-                track_memory[track_id]["counted"] = True
-                track_memory[track_id]["passed_vertical"] = True
-
-                # Prepare for batch insert
-                frame_detections = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "track_id": track_id,
-                    "label": results.names[class_id],
-                    "confidence": round(confidence, 3),
-                    "bbox": [x1, y1, x2, y2]
-                }
-                batch_detections.append(frame_detections)
-
-            # Update coordinates
-            track_memory[track_id]["prev_cx"] = track_memory[track_id]["cx"]
-            track_memory[track_id]["prev_cy"] = track_memory[track_id]["cy"]
-            track_memory[track_id]["cx"] = cx
-            track_memory[track_id]["cy"] = cy
-            track_memory[track_id]["lifetime"] += 1
-            track_memory[track_id]["last_seen"] = frame_idx
-
-        #=======DRAW=======#
         label = f"{results.names[class_id]} {track_id}: {confidence:.2f}"
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
