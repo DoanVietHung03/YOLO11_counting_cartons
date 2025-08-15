@@ -1,0 +1,22 @@
+services:
+  rtsp-server:
+    image: bluenviron/mediamtx
+    container_name: rtsp-server
+    ports:
+      - "46458:8554"
+    restart: always
+
+  ffmpeg-relay:
+    image: jrottenberg/ffmpeg:4.4-ubuntu
+    container_name: ffmpeg-relay
+    depends_on:
+      - rtsp-server
+    volumes:
+      - ./data-test.mp4:/videos/data-test.mp4:ro
+      - ./test_2.mp4:/videos/test_2.mp4:ro
+    restart: always
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "ffmpeg -re -stream_loop -1 -i /videos/data-test.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream
+      & ffmpeg -re -stream_loop -1 -i /videos/test_2.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream2
+      && wait"
