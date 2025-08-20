@@ -20,3 +20,28 @@ services:
       "ffmpeg -re -stream_loop -1 -i /videos/data-test.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream
       & ffmpeg -re -stream_loop -1 -i /videos/test_2.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream2
       && wait"
+
+  test:
+    build: .
+    container_name: yolo11_test
+    depends_on:
+      - rtsp-server
+      - db
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/test
+    working_dir: /test
+    command: python main.py
+
+  db:
+    image: mysql:9.4
+    container_name: mysql_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: 12345
+      MYSQL_DATABASE: rtsp_db
+      # MYSQL_USER: root
+      # MYSQL_PASSWORD: 12345
+    ports:
+      - "3306:3306"

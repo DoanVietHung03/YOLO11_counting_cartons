@@ -33,8 +33,8 @@ os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
 # ====================== CONFIG ======================
 CONFIG = {
     # IO / Model
-    'RTSP_URL': 'rtsp://localhost:46458/mystream2',
-    'MODEL_PATH': 'D:/Test/best.pt',
+    'RTSP_URL': 'rtsp://rtsp-server:8554/mystream2',
+    'MODEL_PATH': './best.pt',
     'CONF_THRESHOLD': 0.4,
     'CLASS_ID': 1,  # stamp
 
@@ -402,4 +402,4 @@ async def ws_endpoint(ws: WebSocket):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='localhost', port=8000)
+    uvicorn.run(app, host='0.0.0.0', port=8000)

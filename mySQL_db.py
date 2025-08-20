@@ -6,7 +6,7 @@ def db_insert(detections_list):
     try:
         # Connect to server
         db_config = {
-            'host': "localhost",
+            'host': "db",
             'port': 3306,
             'user': "root",
             'password': "12345",
