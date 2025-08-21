@@ -379,10 +379,7 @@ async def ws_endpoint(ws: WebSocket):
             if show_visuals:
                 frame = draw_visuals(frame)
 
-            if batch_detections and (len(batch_detections) >= CONFIG['BATCH_SIZE']):
-                await run_in_threadpool(db_insert, batch_detections)
-                batch_detections = []
-            elif FRAME_IDX % 100 == 0 and batch_detections:
+            if batch_detections and (len(batch_detections) >= CONFIG['BATCH_SIZE'] or FRAME_IDX % 100 == 0):
                 await run_in_threadpool(db_insert, batch_detections)
                 batch_detections = []
 
