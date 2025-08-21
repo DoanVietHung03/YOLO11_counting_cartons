@@ -38,7 +38,7 @@ os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
 #====================== CONFIG ======================#
 CONFIG = {
     # IO / Model
-    'RTSP_URL': 'rtsp://rtsp-server:8554/mystream2',
+    'RTSP_URL': 'rtsp://rtsp-server:8554/mystream',
     'MODEL_PATH': './best.pt',
     'CONF_THRESHOLD': 0.4,
     'CLASS_ID': 1,  # stamp
@@ -78,6 +78,7 @@ CONFIG['RESIZE_PERCENT'] = 40 if rtsp_last == 'mystream2' else 60
 # ====================== GLOBAL STATE ======================
 TOTAL_COUNT = 0
 FRAME_IDX = 0
+stop_event = asyncio.Event()
 
 # ====================== MODEL ======================
 logger.info('Loading YOLO model...')
@@ -151,11 +152,10 @@ else:
 def preprocess_frame(frame):
     if CONFIG['RESIZE_PERCENT'] and CONFIG['RESIZE_PERCENT'] != 100:
         h, w = frame.shape[:2]
-        nh = h * CONFIG['RESIZE_PERCENT'] // 100
-        nw = w * CONFIG['RESIZE_PERCENT'] // 100
+        nh = int(h * CONFIG['RESIZE_PERCENT'] // 100)
+        nw = int(w * CONFIG['RESIZE_PERCENT'] // 100)
         frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
     return frame
-
 
 def handle_frame(frame):
     frame = preprocess_frame(frame)
@@ -171,7 +171,7 @@ def handle_frame(frame):
         frame_buffer.put(frame)
 
 def handle_stream(cap):
-    while True:
+    while config.WEB_STATUS:
         ret, frame = cap.read()
         if not ret:
             logger.error('Stream disconnected. Reconnecting...')
@@ -181,15 +181,22 @@ def handle_stream(cap):
 
 def frame_reader(rtsp_url: str):
     backoff = 2
-    while True:
+    while not stop_event.is_set():
+        if not config.WEB_STATUS:
+            time.sleep(1)
+            continue
+
         cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             logger.error('Unable to open RTSP stream. Retrying...')
             time.sleep(backoff)
             backoff = min(backoff * 2, 10)
             continue
+
         backoff = 2
-        handle_stream(cap)
+        if not handle_stream(cap):
+            cap.release()
+            continue
         cap.release()
 
 reader_thread = threading.Thread(target=frame_reader, args=(CONFIG['RTSP_URL'],), daemon=True)
@@ -344,8 +351,26 @@ async def ws_endpoint(ws: WebSocket):
 
     batch_detections = []
     show_visuals = True
+
+    disconnected = asyncio.Event()
+
+    async def monitor_disconnect():
+        try:
+            while True:
+                await ws.receive()  # Waits for any client message (none expected) or disconnect
+        except WebSocketDisconnect:
+            disconnected.set()
+        except Exception as e:
+            logger.error(f'Receive error: {e}')
+            disconnected.set()
+
+    monitor_task = asyncio.create_task(monitor_disconnect())
+
     try:
-        while True:
+        while not stop_event.is_set():
+            if not config.WEB_STATUS or disconnected.is_set():
+                break
+
             # Pull latest frame
             if isinstance(frame_buffer, LatestFrame):
                 frame = frame_buffer.get()
@@ -379,7 +404,7 @@ async def ws_endpoint(ws: WebSocket):
             if show_visuals:
                 frame = draw_visuals(frame)
 
-            if batch_detections and (len(batch_detections) >= CONFIG['BATCH_SIZE'] or FRAME_IDX % 100 == 0):
+            if config.WEB_STATUS and batch_detections and (len(batch_detections) >= CONFIG['BATCH_SIZE'] or FRAME_IDX % 100 == 0):
                 await run_in_threadpool(db_insert, batch_detections)
                 batch_detections = []
 
@@ -401,8 +426,14 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         logger.error(f'WebSocket error: {e}')
     finally:
+        stop_event.set()
         config.WEB_STATUS = False
+        batch_detections = []
         logger.info(f'Client disconnected. WEB_STATUS = {config.WEB_STATUS}')
+        if not isinstance(frame_buffer, LatestFrame):
+            while not frame_buffer.empty():
+                frame_buffer.get_nowait()
+        track_memory.clear()
         await ws.close()
 
 if __name__ == '__main__':

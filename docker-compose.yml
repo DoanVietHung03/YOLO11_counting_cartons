@@ -12,14 +12,24 @@ services:
     depends_on:
       - rtsp-server
     volumes:
-      - ./data-test.mp4:/videos/data-test.mp4:ro
-      - ./test_2.mp4:/videos/test_2.mp4:ro
+      - ../sampleTest/data-test.mp4:/videos/data-test.mp4:ro
+      - ../sampleTest/test_2.mp4:/videos/test_2.mp4:ro
     restart: always
     entrypoint: ["/bin/sh", "-c"]
     command: >
       "ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/data-test.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream
       & ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/test_2.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream2
       && wait"
+      
+  db:
+    image: mysql:9.4
+    container_name: mysql_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: 12345
+      MYSQL_DATABASE: rtsp_db
+    ports:
+      - "43306:3306"
 
   test:
     build: .
@@ -40,13 +50,3 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-  db:
-    image: mysql:9.4
-    container_name: mysql_db
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: 12345
-      MYSQL_DATABASE: rtsp_db
-    ports:
-      - "43306:3306"
