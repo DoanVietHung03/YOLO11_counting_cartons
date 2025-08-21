@@ -17,8 +17,8 @@ services:
     restart: always
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "ffmpeg -re -stream_loop -1 -i /videos/data-test.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream
-      & ffmpeg -re -stream_loop -1 -i /videos/test_2.mp4 -c copy -f rtsp rtsp://rtsp-server:8554/mystream2
+      "ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/data-test.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream
+      & ffmpeg -re -stream_loop -1 -err_detect ignore_err -i /videos/test_2.mp4 -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://rtsp-server:8554/mystream2
       && wait"
 
   test:
@@ -33,6 +33,13 @@ services:
       - .:/test
     working_dir: /test
     command: python main.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   db:
     image: mysql:9.4
@@ -41,7 +48,5 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: 12345
       MYSQL_DATABASE: rtsp_db
-      # MYSQL_USER: root
-      # MYSQL_PASSWORD: 12345
     ports:
-      - "3306:3306"
+      - "43306:3306"

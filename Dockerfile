@@ -11,9 +11,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Cài dependencies, --no-cache-dir giúp không lưu cache → image nhẹ hơn.
+RUN pip install --no-cache-dir torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1 --extra-index-url https://download.pytorch.org/whl/cu121
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1 --extra-index-url https://download.pytorch.org/whl/cu121 \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 
 # Đặt thư mục làm việc mặc định trong container là /TEST. Mọi lệnh tiếp theo (copy, run, cmd) sẽ thực hiện trong /TEST.

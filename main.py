@@ -18,6 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from ultralytics import YOLO
 from supervision import ByteTrack, Detections
 from mySQL_db import db_insert
+import config
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,12 +26,16 @@ logger = logging.getLogger('rtsp-yolo-bytrack')
 
 # ====================== TORCH / CUDA ======================
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+logger.info(f'Using device: {device}')
+if device.type == 'cuda':
+    logger.info(f"GPU name: {torch.cuda.get_device_name(0)}")
+
 torch.backends.cudnn.benchmark = True  # Optimize for varying input sizes
 
-# ====================== OPENCV RTSP (TCP) ======================
+#====================== OPENCV RTSP (TCP) ======================#
 os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp'
 
-# ====================== CONFIG ======================
+#====================== CONFIG ======================#
 CONFIG = {
     # IO / Model
     'RTSP_URL': 'rtsp://rtsp-server:8554/mystream2',
@@ -39,8 +44,7 @@ CONFIG = {
     'CLASS_ID': 1,  # stamp
 
     # Geometry / Preprocess
-    'RESIZE_PERCENT': 70,   # downscale to save compute
-    'ROTATE_CCW_90': True,  # camera mounted portrait? rotate if needed
+    'RESIZE_PERCENT': None,   # downscale to save compute
 
     # Counting Logic
     'MOVE_THRESHOLD': 5,
@@ -49,8 +53,8 @@ CONFIG = {
     # Tracking
     'LOST_TRACK_BUFFER': 100,
 
-    # DB batching
-    'BATCH_SIZE': 10,
+    # DB batching and status
+    'BATCH_SIZE': 6,
 
     # Frame scheduling
     'FRAME_SKIP_MIN': 1,
@@ -61,12 +65,15 @@ CONFIG = {
 
     # Frame buffer
     'USE_LATEST_ONLY': True,          # ultra-low latency: overwrite single-slot buffer
-    'QUEUE_SIZE': 128,                # used when USE_LATEST_ONLY=False
+    'QUEUE_SIZE': 540,                # used when USE_LATEST_ONLY=False
 
     # Streaming
     'SEND_BINARY': True,              # WebSocket send bytes (faster than base64)
     'JPEG_QUALITY': 80,
 }
+
+rtsp_last = CONFIG['RTSP_URL'].rstrip('/').split('/')[-1]
+CONFIG['RESIZE_PERCENT'] = 40 if rtsp_last == 'mystream2' else 60
 
 # ====================== GLOBAL STATE ======================
 TOTAL_COUNT = 0
@@ -147,8 +154,6 @@ def preprocess_frame(frame):
         nh = h * CONFIG['RESIZE_PERCENT'] // 100
         nw = w * CONFIG['RESIZE_PERCENT'] // 100
         frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-    if CONFIG['ROTATE_CCW_90']:
-        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return frame
 
 
@@ -262,15 +267,15 @@ def process_frame(frame, frame_idx, batch_detections):
         update_track_memory(track_id, cx, cy, class_id, confidence, frame_idx, w, h, batch_detections)
 
         # draw box (keep simple to save CPU)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 1)
 
     return frame, batch_detections
 
 
 def draw_visuals(frame):
     h, w = frame.shape[:2]
-    cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 2)
-    cv2.putText(frame, f'Total: {TOTAL_COUNT}', (int(w // 20), int(h // 20)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+    cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 1)
+    cv2.putText(frame, f'Total: {TOTAL_COUNT}', (int(w // 20), int(h // 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 1)
     return frame
 
 
@@ -303,7 +308,7 @@ HTML = f"""
   </style>
 </head>
 <body>
-  <h2 style='text-align:center'>RTSP → YOLOv8 + ByteTrack (binary WS)</h2>
+  <h2 style='text-align:center'>RTSP → YOLOv11 + ByteTrack (binary WS)</h2>
   <img id='video' />
   <script>
     const ws = new WebSocket('ws://'+location.host+'/ws');
@@ -326,16 +331,17 @@ HTML = f"""
 </html>
 """
 
-
 @app.get('/')
 async def index():
     return HTMLResponse(HTML)
-
 
 @app.websocket('/ws')
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     global FRAME_IDX, TOTAL_COUNT
+    config.WEB_STATUS = True
+    logger.info(f'Client connected. WEB_STATUS = {config.WEB_STATUS}')
+
     batch_detections = []
     show_visuals = True
     try:
@@ -373,11 +379,12 @@ async def ws_endpoint(ws: WebSocket):
             if show_visuals:
                 frame = draw_visuals(frame)
 
-            # Batch insert to DB
-            if len(batch_detections) >= CONFIG['BATCH_SIZE'] or FRAME_IDX % 100 == 0:
-                if batch_detections:
-                    await run_in_threadpool(db_insert, batch_detections)
-                    batch_detections.clear()
+            if batch_detections and (len(batch_detections) >= CONFIG['BATCH_SIZE']):
+                await run_in_threadpool(db_insert, batch_detections)
+                batch_detections = []
+            elif FRAME_IDX % 100 == 0 and batch_detections:
+                await run_in_threadpool(db_insert, batch_detections)
+                batch_detections = []
 
             # Encode JPEG once per frame sent
             encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']]
@@ -397,8 +404,9 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         logger.error(f'WebSocket error: {e}')
     finally:
+        config.WEB_STATUS = False
+        logger.info(f'Client disconnected. WEB_STATUS = {config.WEB_STATUS}')
         await ws.close()
-
 
 if __name__ == '__main__':
     import uvicorn
