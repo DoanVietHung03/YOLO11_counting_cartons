@@ -88,9 +88,12 @@ def db_worker():
         item = db_queue.get()
         if item is None:
             break
+        logger.info(f"====== DB WORKER: Got item from queue. Preparing to insert. ======")
         stream_id, detections = item
+        logger.info(f"Data for stream {stream_id}: {len(detections)} records.")
         try:
             db_insert(detections, stream_id)
+            logger.info(f"Stream {stream_id}: Successfully inserted {len(detections)} records into DB.")
         except Exception as e:
             logger.error(f"Error inserting into DB for stream {stream_id}: {e}")
         db_queue.task_done()
@@ -145,7 +148,9 @@ class VideoProcessor:
         try:
             model.fuse()
             logger.info(f'Model layers fused for stream {self.stream_id}.')
-        except Exception: pass
+        except Exception: 
+            logger.warning(f'Failed to fuse model layers for stream {self.stream_id}. Continuing without fusion.')
+            pass
         if self.device.type == 'cuda':
             model.model.half()
             logger.info(f'FP16 inference enabled for stream {self.stream_id}.')
@@ -190,6 +195,7 @@ class VideoProcessor:
                         self.frame_buffer.get_nowait()
                         self.frame_buffer.put(frame)
                     except queue.Empty:
+                        logger.warning(f"Frame buffer full and empty for stream {self.stream_id}. Dropping frame.")
                         pass
                 cv2.waitKey(1)
             cap.release()
@@ -409,6 +415,7 @@ async def ws_endpoint(ws: WebSocket):
                     )
 
                 # Kiểm tra và gửi batch đến DB
+                logger.info(f"Stream {processor.stream_id}: Current batch size: {len(batch_to_db[processor.stream_id])}")
                 if batch_to_db[processor.stream_id] and len(batch_to_db[processor.stream_id]) >= processor.config['BATCH_SIZE']:
                     db_queue.put((processor.stream_id, batch_to_db[processor.stream_id].copy()))
                     batch_to_db[processor.stream_id].clear()
