@@ -5,7 +5,6 @@ import os
 import cv2
 import time
 import math
-import base64
 import torch
 import logging
 import asyncio
@@ -15,7 +14,6 @@ import uvicorn
 import json
 from collections import deque
 from datetime import datetime
-from mysql.connector.pooling import MySQLConnectionPool
 from concurrent.futures import ThreadPoolExecutor
 
 # FastAPI và các thành phần liên quan
@@ -76,7 +74,11 @@ CONFIG = {
 # ===================== DB =========================
 # Khởi tạo kết nối đến cơ sở dữ liệu
 stream_ids = [i for i, _ in enumerate(CONFIG['RTSP_URLS'])]
-initialize_database(stream_ids)
+try:
+    initialize_database(stream_ids)
+except Exception as e:
+    logger.error(f"Failed to initialize database: {e}")
+    exit()
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -90,7 +92,6 @@ def db_worker():
         item = db_queue.get()
         if item is None:
             break
-        logger.info(f"====== DB WORKER: Got item from queue. Preparing to insert. ======")
         stream_id, detections = item
         logger.info(f"Data for stream {stream_id}: {len(detections)} records.")
         try:
@@ -98,7 +99,8 @@ def db_worker():
             logger.info(f"Stream {stream_id}: Successfully inserted {len(detections)} records into DB.")
         except Exception as e:
             logger.error(f"Error inserting into DB for stream {stream_id}: {e}")
-        db_queue.task_done()
+        finally:
+            db_queue.task_done()
 
 threading.Thread(target=db_worker, daemon=True).start()
 
