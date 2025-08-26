@@ -71,6 +71,10 @@ CONFIG = {
     'JPEG_QUALITY': 70,
 }
 
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('rtsp-yolo-bytrack')
+
 # ===================== DB =========================
 # Khởi tạo kết nối đến cơ sở dữ liệu
 stream_ids = [i for i, _ in enumerate(CONFIG['RTSP_URLS'])]
@@ -80,9 +84,6 @@ except Exception as e:
     logger.error(f"Failed to initialize database: {e}")
     exit()
 
-# ====================== LOGGING ======================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('rtsp-yolo-bytrack')
 
 # ====================== DATABASE WORKER ======================
 db_queue = queue.Queue()
@@ -412,9 +413,7 @@ async def ws_endpoint(ws: WebSocket):
                     if new_detections:
                         batch_to_db[processor.stream_id].extend(new_detections)
                 else:
-                    processed_frame, _, _ = await run_in_threadpool(
-                        processor.process_and_draw_frame, frame
-                    )
+                    processed_frame = frame
 
                 # Kiểm tra và gửi batch đến DB
                 if batch_to_db[processor.stream_id] and len(batch_to_db[processor.stream_id]) >= processor.config['BATCH_SIZE']:
@@ -449,8 +448,8 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         for processor in video_processors:
             processor.set_web_status(False)
-        for stream_id in batch_to_db:
-            batch_to_db[stream_id].clear()
+            if batch_to_db[processor.stream_id]:
+                batch_to_db[processor.stream_id].clear()
         logger.info("WebSocket connection closed.")
 
 if __name__ == '__main__':
