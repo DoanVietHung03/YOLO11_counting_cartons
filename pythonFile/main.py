@@ -369,7 +369,7 @@ HTML = """
                     console.error('Error processing WebSocket data:', e);
                 }
             };
-            reader.readAsText(new Blob([ev.data.slice(0, 200)])); // Tăng kích thước để đảm bảo đọc hết metadata
+            reader.readAsText(new Blob([ev.data.slice(0, 400)])); // Tăng kích thước để đảm bảo đọc hết metadata
         }
     };
     ws.onerror = (e) => console.error('WebSocket error:', e);
@@ -388,8 +388,6 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     for processor in video_processors:
         processor.set_web_status(True)
-
-    print(processor.stream_id)
     
     batch_to_db = {processor.stream_id: [] for processor in video_processors}
     try:
@@ -417,7 +415,6 @@ async def ws_endpoint(ws: WebSocket):
                     )
 
                 # Kiểm tra và gửi batch đến DB
-                logger.info(f"Stream {processor.stream_id}: Current batch size: {len(batch_to_db[processor.stream_id])}")
                 if batch_to_db[processor.stream_id] and len(batch_to_db[processor.stream_id]) >= processor.config['BATCH_SIZE']:
                     db_queue.put((processor.stream_id, batch_to_db[processor.stream_id].copy()))
                     batch_to_db[processor.stream_id].clear()
