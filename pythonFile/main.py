@@ -15,6 +15,7 @@ import json
 from collections import deque
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from fastapi.staticfiles import StaticFiles
 
 # FastAPI và các thành phần liên quan
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -327,60 +328,30 @@ async def shutdown_event():
         processor.stop_reader()
     db_queue.put(None)  # Dừng db_worker
 
+# Đăng ký StaticFiles để phục vụ các tệp tĩnh
+app.mount("/static", StaticFiles(directory="./static"), name="static")
+
 # HTML giao diện với nhiều video
 HTML = """
 <!doctype html>
 <html>
 <head><meta charset='utf-8'><title>RTSP Streams</title>
-<style>body{background:#111;color:#eee;font-family:sans-serif;}
-.video-container{display:flex;justify-content:center;flex-wrap:wrap;}
-.video{display:block;margin:10px;width:auto;height:auto;object-fit:contain;max-width:none;border:1px solid #444;}
+<style>
+    body{background:#111;color:#eee;font-family:sans-serif;}
+    .video-container{display:flex;justify-content:center;flex-wrap:wrap;}
+    .video{display:block;margin:10px;width:auto;height:auto;object-fit:contain;max-width:none;border:1px solid #444;}
+    canvas { display: block; width: auto; height: auto; image-rendering: pixelated; }
 </style>
 </head>
 <body>
 <h2 style='text-align:center'>Multi-RTSP → YOLOv11n + ByteTrack</h2>
-<div class='video-container'>
+<div class='video-container' data-stream-count='%d'>
 %s
 </div>
-<script>
-    const ws = new WebSocket('ws://' + location.host + '/ws');
-    ws.binaryType = 'blob';
-    ws.onmessage = (ev) => {
-        if (ev.data instanceof Blob) {
-            const reader = new FileReader();
-            reader.onload = () => {
-                try {
-                    // Tìm vị trí của dấu phân cách "|"
-                    const separatorIndex = reader.result.indexOf('|');
-                    if (separatorIndex === -1) {
-                        console.error('No separator found in WebSocket data');
-                        return;
-                    }
-                    // Tách metadata và frame
-                    const metadataStr = reader.result.slice(0, separatorIndex);
-                    const frameData = ev.data.slice(separatorIndex + 1);
-                    const data = JSON.parse(metadataStr);
-                    const img = document.getElementById('video_stream_' + data.stream_id);
-                    if (img) {
-                        const url = URL.createObjectURL(frameData);
-                        img.onload = () => URL.revokeObjectURL(url);
-                        img.src = url;
-                    } else {
-                        console.error('Image element not found for stream_id: ' + data.stream_id);
-                    }
-                } catch (e) {
-                    console.error('Error processing WebSocket data:', e);
-                }
-            };
-            reader.readAsText(new Blob([ev.data.slice(0, 400)])); // Tăng kích thước để đảm bảo đọc hết metadata
-        }
-    };
-    ws.onerror = (e) => console.error('WebSocket error:', e);
-    ws.onclose = () => console.log('WebSocket closed');
-</script>
+<script src='./static/main.js'></script>
 </body>
 </html>
-""" % ''.join([f"<img id='video_stream_{i}' class='video' />" for i in range(len(CONFIG['RTSP_URLS']))])
+""" % (len(CONFIG['RTSP_URLS']), ''.join([f"<img id='video_stream_{i}' class='video' />" for i in range(len(CONFIG['RTSP_URLS']))]))
 
 @app.get('/')
 async def index():
@@ -420,35 +391,28 @@ async def ws_endpoint(ws: WebSocket):
                     db_queue.put((processor.stream_id, batch_to_db[processor.stream_id].copy()))
                     batch_to_db[processor.stream_id].clear()
                     if processor.stamp_count >= 6:
-                        if isinstance(processor.frame_buffer, processor._LatestFrame):
-                            processor.frame_buffer._frame = None
-                        else:
-                            processor.frame_buffer.clear()
                         processor.stamp_count = 0
-                        logger.info(f"Cleared old frames for stream {processor.stream_id} after 6 stamps.")
 
                 if processed_frame is not None:
-                    logger.debug(f"Processed frame shape: {processed_frame.shape}")
                     ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
                     if ok:
                         metadata = json.dumps({"stream_id": processor.stream_id}).encode()
-                        logger.debug(f"Sending frame for stream {processor.stream_id}, metadata size: {len(metadata)}, frame size: {len(buf)}")
                         await ws.send_bytes(metadata + b"|" + buf.tobytes())
                     else:
                         logger.error(f"Failed to encode frame for stream {processor.stream_id}")
 
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.001)
 
         await asyncio.gather(*(process_stream(processor) for processor in video_processors))
 
     except WebSocketDisconnect:
         logger.info("Client disconnected.")
     except Exception as e:
-        logger.error(f'WebSocket error: {e}')
+        logger.error(f'WebSocket error: {e}', exc_info=True)
     finally:
         for processor in video_processors:
             processor.set_web_status(False)
-            if batch_to_db[processor.stream_id]:
+            if len(batch_to_db[processor.stream_id]) != 0:
                 batch_to_db[processor.stream_id].clear()
         logger.info("WebSocket connection closed.")
 
