@@ -11,6 +11,8 @@ import logging
 import asyncio
 import threading
 import queue
+import uvicorn
+import json
 from collections import deque
 from datetime import datetime
 from mysql.connector.pooling import MySQLConnectionPool
@@ -52,7 +54,7 @@ CONFIG = {
     'MIN_LIFETIME': 3,
 
     # Tracking
-    'LOST_TRACK_BUFFER': 200,
+    'LOST_TRACK_BUFFER': 100,
 
     # Db batching
     'BATCH_SIZE': 6,
@@ -60,7 +62,7 @@ CONFIG = {
     # Frame scheduling (Adaptive Skip dựa trên thời gian)
     'FRAME_SKIP_MIN': 1, # Bỏ qua tối thiểu 1 frame (tức là xử lý gần như mọi frame)
     'FRAME_SKIP_MAX': 6, # Bỏ qua tối đa 6 frame khi hệ thống bị quá tải
-    'LOAD_THRESHOLD_HIGH': 1.8, # Nếu (thời gian xử lý) > (thời gian 1 frame) * 1.8 -> Tăng skip
+    'LOAD_THRESHOLD_HIGH': 1.5, # Nếu (thời gian xử lý) > (thời gian 1 frame) * 1.5 -> Tăng skip
     'LOAD_THRESHOLD_LOW': 0.5, # Nếu (thời gian xử lý) < (thời gian 1 frame) * 0.5 -> Giảm skip
 
     # Frame buffer
@@ -253,7 +255,7 @@ class VideoProcessor:
                 
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 self._update_track_memory(track_id, cx, cy, class_id, confidence, w, h, batch_detections)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 1)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
             to_del = [tid for tid, m in self.track_memory.items() if self.frame_idx - m['last_seen'] > self.config['LOST_TRACK_BUFFER'] * 2]
             for tid in to_del:
@@ -449,13 +451,8 @@ async def ws_endpoint(ws: WebSocket):
         for processor in video_processors:
             processor.set_web_status(False)
         for stream_id in batch_to_db:
-            if batch_to_db[stream_id]:
-                logger.info(f"Flushing {len(batch_to_db[stream_id])} remaining records for stream {stream_id}.")
-                db_queue.put((stream_id, batch_to_db[stream_id].copy()))
-                batch_to_db[stream_id].clear()
+            batch_to_db[stream_id].clear()
         logger.info("WebSocket connection closed.")
 
 if __name__ == '__main__':
-    import uvicorn
-    import json
     uvicorn.run(app, host='0.0.0.0', port=8000, workers=1)
