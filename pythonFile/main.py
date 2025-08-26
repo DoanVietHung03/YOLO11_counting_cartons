@@ -45,14 +45,14 @@ CONFIG = {
     'CLASS_ID': 1,  # ID của lớp 'stamp'
 
     # Geometry / Preprocess
-    'RESIZE_PERCENT': 60,
+    'RESIZE_PERCENT': 50,
 
     # Counting Logic
     'MOVE_THRESHOLD': 5,
     'MIN_LIFETIME': 3,
 
     # Tracking
-    'LOST_TRACK_BUFFER': 100,
+    'LOST_TRACK_BUFFER': 200,
 
     # Db batching
     'BATCH_SIZE': 6,
@@ -60,7 +60,7 @@ CONFIG = {
     # Frame scheduling (Adaptive Skip dựa trên thời gian)
     'FRAME_SKIP_MIN': 1, # Bỏ qua tối thiểu 1 frame (tức là xử lý gần như mọi frame)
     'FRAME_SKIP_MAX': 6, # Bỏ qua tối đa 6 frame khi hệ thống bị quá tải
-    'LOAD_THRESHOLD_HIGH': 1.2, # Nếu (thời gian xử lý) > (thời gian 1 frame) * 1.2 -> Tăng skip
+    'LOAD_THRESHOLD_HIGH': 1.8, # Nếu (thời gian xử lý) > (thời gian 1 frame) * 1.8 -> Tăng skip
     'LOAD_THRESHOLD_LOW': 0.5, # Nếu (thời gian xử lý) < (thời gian 1 frame) * 0.5 -> Giảm skip
 
     # Frame buffer
@@ -449,7 +449,10 @@ async def ws_endpoint(ws: WebSocket):
         for processor in video_processors:
             processor.set_web_status(False)
         for stream_id in batch_to_db:
-            batch_to_db[stream_id].clear()
+            if batch_to_db[stream_id]:
+                logger.info(f"Flushing {len(batch_to_db[stream_id])} remaining records for stream {stream_id}.")
+                db_queue.put((stream_id, batch_to_db[stream_id].copy()))
+                batch_to_db[stream_id].clear()
         logger.info("WebSocket connection closed.")
 
 if __name__ == '__main__':
