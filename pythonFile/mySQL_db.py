@@ -40,7 +40,7 @@ def initialize_database(stream_ids: list):
         with mysql.connector.connect(**temp_config) as cnx:
             with cnx.cursor() as cur:
                 cur.execute(f"CREATE DATABASE IF NOT EXISTS {DB_CONFIG['database']}")
-                logger.info(f"Database '{DB_CONFIG['database']}' ensured to exist.")
+                logger.info(f"Database '{DB_CONFIG['database']}' has been created.")
                 
         # Kết nối vào database để tạo bảng cho mỗi stream
         with db_pool.get_connection() as cnx:

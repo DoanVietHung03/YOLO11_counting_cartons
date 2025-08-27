@@ -1,6 +1,4 @@
 document.addEventListener('DOMContentLoaded', function() {
-
-    // --- Toàn bộ code cũ của bạn nằm ở trong này ---
     const videoContainer = document.querySelector('.video-container');
     // Thêm một kiểm tra để chắc chắn videoContainer tồn tại
     if (!videoContainer) {

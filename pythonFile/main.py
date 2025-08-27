@@ -95,7 +95,6 @@ def db_worker():
         if item is None:
             break
         stream_id, detections = item
-        logger.info(f"Data for stream {stream_id}: {len(detections)} records.")
         try:
             db_insert(detections, stream_id)
             logger.info(f"Stream {stream_id}: Successfully inserted {len(detections)} records into DB.")
@@ -149,7 +148,6 @@ class VideoProcessor:
             with self._lock: return None if self._frame is None else self._frame.copy()
 
     def _load_model(self):
-        logger.info(f'Loading YOLO model for stream {self.stream_id}...')
         model = YOLO(self.config['MODEL_PATH']).to(self.device)
         try:
             model.fuse()
@@ -205,7 +203,6 @@ class VideoProcessor:
                         pass
                 cv2.waitKey(1)
             cap.release()
-        logger.info(f"Frame reader thread for stream {self.stream_id} stopped.")
 
     def start_reader(self):
         if self.reader_thread is None or not self.reader_thread.is_alive():
@@ -351,7 +348,7 @@ HTML = """
 <script src='./static/main.js'></script>
 </body>
 </html>
-""" % (len(CONFIG['RTSP_URLS']), ''.join([f"<img id='video_stream_{i}' class='video' />" for i in range(len(CONFIG['RTSP_URLS']))]))
+""" % (len(CONFIG['RTSP_URLS']), ''.join([f"<canvas id='video_stream_{i}' class='video'></canvas>" for i in range(len(CONFIG['RTSP_URLS']))]))
 
 @app.get('/')
 async def index():
@@ -396,8 +393,8 @@ async def ws_endpoint(ws: WebSocket):
                 if processed_frame is not None:
                     ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
                     if ok:
-                        metadata = json.dumps({"stream_id": processor.stream_id}).encode()
-                        await ws.send_bytes(metadata + b"|" + buf.tobytes())
+                        frame_data = bytes([processor.stream_id]) + buf.tobytes()
+                        await ws.send_bytes(frame_data)
                     else:
                         logger.error(f"Failed to encode frame for stream {processor.stream_id}")
 
