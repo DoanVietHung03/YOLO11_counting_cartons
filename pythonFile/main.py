@@ -354,64 +354,64 @@ HTML = """
 async def index():
     return HTMLResponse(HTML)
 
-@app.websocket('/ws')
-async def ws_endpoint(ws: WebSocket):
+@app.websocket('/ws/{stream_id}')
+async def ws_endpoint(ws: WebSocket, stream_id: int):
+    if not (0 <= stream_id < len(video_processors)):
+        await ws.close(code=1008, reason="Invalid stream ID")
+        return
+
     await ws.accept()
-    for processor in video_processors:
-        processor.set_web_status(True)
+    processor = video_processors[stream_id]
+    processor.set_web_status(True)
     
-    batch_to_db = {processor.stream_id: [] for processor in video_processors}
+    batch_to_db = []
     try:
-        async def process_stream(processor):
-            while ws.client_state == WebSocketState.CONNECTED:
-                frame = processor.frame_buffer.get()
-                if frame is None:
-                    await asyncio.sleep(0.01)
-                    continue
+        while ws.client_state == WebSocketState.CONNECTED:
+            frame = processor.frame_buffer.get()
+            if frame is None:
+                await asyncio.sleep(0.01)
+                continue
 
-                processor.frame_idx += 1
-                processor.stamp_count += 1
+            processor.frame_idx += 1
+            processor.stamp_count += 1
 
-                processed_frame = None
-                if processor.frame_idx % processor.frame_skip == 0:
-                    processed_frame, new_detections, processing_time = await run_in_threadpool(
-                        processor.process_and_draw_frame, frame
-                    )
-                    processor.tune_frame_skip_by_time(processing_time)
-                    if new_detections:
-                        batch_to_db[processor.stream_id].extend(new_detections)
+            processed_frame = None
+            if processor.frame_idx % processor.frame_skip == 0:
+                processed_frame, new_detections, processing_time = await run_in_threadpool(
+                    processor.process_and_draw_frame, frame
+                )
+                processor.tune_frame_skip_by_time(processing_time)
+                if new_detections:
+                    batch_to_db.extend(new_detections)
+            else:
+                processed_frame = frame
+
+            # Kiểm tra và gửi batch đến DB
+            if batch_to_db and len(batch_to_db) >= processor.config['BATCH_SIZE']:
+                db_queue.put((processor.stream_id, batch_to_db.copy()))
+                batch_to_db.clear()
+                if processor.stamp_count >= 6:
+                    processor.stamp_count = 0
+
+            if processed_frame is not None:
+                ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
+                if ok:
+                    await ws.send_bytes(buf.tobytes())
                 else:
-                    processed_frame = frame
+                    logger.error(f"Failed to encode frame for stream {processor.stream_id}")
 
-                # Kiểm tra và gửi batch đến DB
-                if batch_to_db[processor.stream_id] and len(batch_to_db[processor.stream_id]) >= processor.config['BATCH_SIZE']:
-                    db_queue.put((processor.stream_id, batch_to_db[processor.stream_id].copy()))
-                    batch_to_db[processor.stream_id].clear()
-                    if processor.stamp_count >= 6:
-                        processor.stamp_count = 0
-
-                if processed_frame is not None:
-                    ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
-                    if ok:
-                        frame_data = bytes([processor.stream_id]) + buf.tobytes()
-                        await ws.send_bytes(frame_data)
-                    else:
-                        logger.error(f"Failed to encode frame for stream {processor.stream_id}")
-
-                await asyncio.sleep(0.001)
-
-        await asyncio.gather(*(process_stream(processor) for processor in video_processors))
+            await asyncio.sleep(0.001)
 
     except WebSocketDisconnect:
-        logger.info("Client disconnected.")
+        logger.info(f"Client disconnected from stream {stream_id}.")
     except Exception as e:
-        logger.error(f'WebSocket error: {e}', exc_info=True)
+        logger.error(f'WebSocket error on stream {stream_id}: {e}', exc_info=True)
     finally:
-        for processor in video_processors:
-            processor.set_web_status(False)
-            if len(batch_to_db[processor.stream_id]) != 0:
-                batch_to_db[processor.stream_id].clear()
-        logger.info("WebSocket connection closed.")
+        processor.set_web_status(False)
+        if len(batch_to_db) != 0:
+            db_queue.put((processor.stream_id, batch_to_db.copy()))
+            batch_to_db.clear()
+        logger.info("WebSocket connection for stream {stream_id} closed.")
 
 if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=8000, workers=1)

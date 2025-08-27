@@ -1,6 +1,5 @@
 document.addEventListener('DOMContentLoaded', function() {
     const videoContainer = document.querySelector('.video-container');
-    // Thêm một kiểm tra để chắc chắn videoContainer tồn tại
     if (!videoContainer) {
         console.error("Video container not found!");
         return;
@@ -9,43 +8,50 @@ document.addEventListener('DOMContentLoaded', function() {
     const stream_count = parseInt(videoContainer.dataset.streamCount, 10);
     const contexts = new Map();
 
-    for (let i = 0; i < stream_count; i++) {
-        const canvas = document.getElementById('video_stream_' + i);
-        if (canvas) {
-            // Dòng getContext bây giờ sẽ an toàn
-            contexts.set(i, canvas.getContext('2d', { alpha: false }));
-        } else {
-            console.error(`Canvas with id 'video_stream_${i}' not found!`);
+    // Hàm để thiết lập một kết nối WebSocket cho một stream cụ thể
+    const setupWebSocket = (stream_id) => {
+        const canvas = document.getElementById('video_stream_' + stream_id);
+        if (!canvas) {
+            console.error(`Canvas with id 'video_stream_${stream_id}' not found!`);
+            return;
         }
-    }
+        
+        const ctx = canvas.getContext('2d', { alpha: false });
+        contexts.set(stream_id, ctx);
+        
+        // Mỗi stream có một WebSocket riêng
+        const ws = new WebSocket(`ws://${location.host}/ws/${stream_id}`);
+        ws.binaryType = 'blob';
 
-    const ws = new WebSocket('ws://' + location.host + '/ws');
-    ws.binaryType = 'blob';
+        ws.onmessage = async (ev) => {
+            try {
+                // Không cần đọc header stream_id nữa
+                const imageBlob = ev.data;
+                const bitmap = await createImageBitmap(imageBlob);
 
-    ws.onmessage = async (ev) => {
-        try {
-            const data = ev.data;
-            const header = await data.slice(0, 1).arrayBuffer();
-            const stream_id = new Uint8Array(header)[0];
-            const imageBlob = data.slice(1);
-            const ctx = contexts.get(stream_id);
-            if (!ctx) return;
-            const bitmap = await createImageBitmap(imageBlob);
-            if (ctx.canvas.width !== bitmap.width || ctx.canvas.height !== bitmap.height) {
-                ctx.canvas.width = bitmap.width;
-                ctx.canvas.height = bitmap.height;
+                if (ctx.canvas.width !== bitmap.width || ctx.canvas.height !== bitmap.height) {
+                    ctx.canvas.width = bitmap.width;
+                    ctx.canvas.height = bitmap.height;
+                }
+                ctx.drawImage(bitmap, 0, 0);
+                bitmap.close();
+            } catch (e) {
+                if (!(e instanceof DOMException)) {
+                     console.error(`Error processing frame for stream ${stream_id}:`, e);
+                }
             }
-            ctx.drawImage(bitmap, 0, 0);
-            bitmap.close();
-        } catch (e) {
-            if (!(e instanceof DOMException)) {
-                 console.error('Error processing frame:', e);
-            }
-        }
+        };
+
+        ws.onerror = (e) => console.error(`WebSocket error on stream ${stream_id}:`, e);
+        ws.onclose = () => {
+            console.log(`WebSocket for stream ${stream_id} closed. Reconnecting...`);
+            // Thêm logic tự động kết nối lại nếu muốn
+            setTimeout(() => setupWebSocket(stream_id), 2000); // Thử kết nối lại sau 2s
+        };
     };
 
-    ws.onerror = (e) => console.error('WebSocket error:', e);
-    ws.onclose = () => console.log('WebSocket closed');
-    // --- Kết thúc phần code cũ ---
-
+    // Tạo kết nối cho mỗi stream
+    for (let i = 0; i < stream_count; i++) {
+        setupWebSocket(i);
+    }
 });
