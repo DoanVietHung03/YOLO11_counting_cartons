@@ -42,7 +42,7 @@ CONFIG = {
 
     # IO / Model
     'MODEL_PATH': './best.pt',
-    'CONF_THRESHOLD': 0.4,
+    'CONF_THRESHOLD': 0.6,
     'CLASS_ID': 1,  # ID của lớp 'stamp'
 
     # Geometry / Preprocess
@@ -60,7 +60,7 @@ CONFIG = {
 
     # Frame scheduling (Adaptive Skip dựa trên thời gian)
     'FRAME_SKIP_MIN': 1, # Bỏ qua tối thiểu 1 frame (tức là xử lý gần như mọi frame)
-    'FRAME_SKIP_MAX': 6, # Bỏ qua tối đa 6 frame khi hệ thống bị quá tải
+    'FRAME_SKIP_MAX': 8, # Bỏ qua tối đa 8 frame khi hệ thống bị quá tải
     'LOAD_THRESHOLD_HIGH': 1.5, # Nếu (thời gian xử lý) > (thời gian 1 frame) * 1.5 -> Tăng skip
     'LOAD_THRESHOLD_LOW': 0.5, # Nếu (thời gian xử lý) < (thời gian 1 frame) * 0.5 -> Giảm skip
 
@@ -131,6 +131,7 @@ class VideoProcessor:
         self.frame_idx = 0
         self.frame_skip = self.config['FRAME_SKIP_MIN']
         self.stamp_count = 0  # Đếm stamps để xóa frame cũ
+        self.last_tracked_detections = None
 
         # Threading & Buffer
         self.frame_buffer = self._LatestFrame() if self.config['USE_LATEST_ONLY'] else deque(maxlen=10)
@@ -174,7 +175,7 @@ class VideoProcessor:
                 continue
 
             cap = cv2.VideoCapture(self.config['RTSP_URLS'][self.stream_id], cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Giới hạn buffer RTSP
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 5)  # Giới hạn buffer RTSP
             if not cap.isOpened():
                 logger.error(f'Unable to open RTSP stream {self.stream_id}. Retrying in {backoff}s...')
                 time.sleep(backoff)
@@ -231,6 +232,28 @@ class VideoProcessor:
                 self.frame_buffer._frame = None
             else:
                 self.frame_buffer.clear()
+    
+    # Đặt hàm này bên trong class VideoProcessor
+    def draw_detections(self, frame: cv2.Mat, tracked_detections):
+        h, w = frame.shape[:2]
+        
+        # Luôn vẽ đường kẻ và số đếm trước
+        cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 1)
+        cv2.putText(frame, f'Stream {self.stream_id}: {self.total_count}', (int(w / 20), int(h / 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 1)
+
+        if tracked_detections is None:
+            return frame # Nếu không có gì để vẽ, trả về frame đã vẽ text
+
+        # Vẽ các bounding box đã lưu
+        for i in range(len(tracked_detections)):
+            x1, y1, x2, y2 = map(int, tracked_detections.xyxy[i])
+            class_id = int(tracked_detections.class_id[i])
+            
+            # Chỉ vẽ box cho class ID đã định cấu hình
+            if class_id == self.config['CLASS_ID']:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                
+        return frame
 
     def process_and_draw_frame(self, frame: cv2.Mat):
         start_time = time.perf_counter()
@@ -241,6 +264,7 @@ class VideoProcessor:
         
         detections = Detections.from_ultralytics(results)
         tracked = self.tracker.update_with_detections(detections)
+        self.last_tracked_detections = tracked  # Lưu kết quả mới nhất
         
         h, w = frame.shape[:2]
 
@@ -256,17 +280,18 @@ class VideoProcessor:
                 
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 self._update_track_memory(track_id, cx, cy, class_id, confidence, w, h, batch_detections)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
             to_del = [tid for tid, m in self.track_memory.items() if self.frame_idx - m['last_seen'] > self.config['LOST_TRACK_BUFFER'] * 2]
             for tid in to_del:
                 del self.track_memory[tid]
 
-        cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 1)
-        cv2.putText(frame, f'Stream {self.stream_id}: {self.total_count}', (int(w / 20), int(h / 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 1)
+            if self.frame_idx % 300 == 0: # Cứ mỗi 300 frame thì log một lần
+                logger.info(f"Stream {self.stream_id}: Track memory size = {len(self.track_memory)}")
+
+        frame_with_drawings = self.draw_detections(frame, tracked)
 
         processing_time = time.perf_counter() - start_time
-        return frame, batch_detections, processing_time
+        return frame_with_drawings, batch_detections, processing_time
 
     def _update_track_memory(self, track_id, cx, cy, class_id, confidence, w, h, batch_detections):
         m = self.track_memory.get(track_id)
@@ -365,10 +390,20 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
     processor.set_web_status(True)
     
     batch_to_db = []
+    last_flush_time = time.time()  # Mốc thời gian xả batch lần cuối
+    FLUSH_INTERVAL = 5.0  # Xả batch mỗi 5 giây
+
     try:
         while ws.client_state == WebSocketState.CONNECTED:
             frame = processor.frame_buffer.get()
             if frame is None:
+                # KIỂM TRA XẢ BATCH NGAY CẢ KHI KHÔNG CÓ FRAME MỚI
+                if time.time() - last_flush_time > FLUSH_INTERVAL and batch_to_db:
+                    db_queue.put((processor.stream_id, batch_to_db.copy()))
+                    logger.info(f"Stream {stream_id}: Flushing {len(batch_to_db)} items to DB by timeout. DB queue size = {db_queue.qsize()}")
+                    batch_to_db.clear()
+                    last_flush_time = time.time()
+
                 await asyncio.sleep(0.01)
                 continue
 
@@ -384,14 +419,25 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
                 if new_detections:
                     batch_to_db.extend(new_detections)
             else:
-                processed_frame = frame
+                processed_frame = await run_in_threadpool(
+                    processor.draw_detections, frame, processor.last_tracked_detections
+                )
 
-            # Kiểm tra và gửi batch đến DB
-            if batch_to_db and len(batch_to_db) >= processor.config['BATCH_SIZE']:
+            # KIỂM TRA VÀ GỬI BATCH ĐẾN DB VỚI LOGIC MỚI
+            time_since_flush = time.time() - last_flush_time
+            
+            # Điều kiện 1: Batch đã đầy
+            is_batch_full = len(batch_to_db) >= processor.config['BATCH_SIZE']
+            # Điều kiện 2: Đã quá thời gian VÀ batch có dữ liệu
+            is_timeout = time_since_flush > FLUSH_INTERVAL and len(batch_to_db) > 0
+
+            if is_batch_full or is_timeout:
+                reason = "full batch" if is_batch_full else "timeout"
                 db_queue.put((processor.stream_id, batch_to_db.copy()))
+                logger.info(f"Stream {stream_id}: Flushing {len(batch_to_db)} items to DB by {reason}. DB queue size = {db_queue.qsize()}")
                 batch_to_db.clear()
-                if processor.stamp_count >= 6:
-                    processor.stamp_count = 0
+                last_flush_time = time.time()
+
 
             if processed_frame is not None:
                 ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
@@ -410,8 +456,9 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
         processor.set_web_status(False)
         if len(batch_to_db) != 0:
             db_queue.put((processor.stream_id, batch_to_db.copy()))
+            logger.info(f"Stream {stream_id}: Flushing remaining {len(batch_to_db)} items before closing.")
             batch_to_db.clear()
-        logger.info("WebSocket connection for stream {stream_id} closed.")
+        logger.info(f"WebSocket connection for stream {processor.stream_id} closed.")
 
 if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=8000, workers=1)
