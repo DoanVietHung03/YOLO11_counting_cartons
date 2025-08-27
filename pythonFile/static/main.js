@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     const stream_count = parseInt(videoContainer.dataset.streamCount, 10);
-    const contexts = new Map();
+    const contexts = new Map(); 
 
     // Hàm để thiết lập một kết nối WebSocket cho một stream cụ thể
     const setupWebSocket = (stream_id) => {
@@ -21,24 +21,31 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Mỗi stream có một WebSocket riêng
         const ws = new WebSocket(`ws://${location.host}/ws/${stream_id}`);
-        ws.binaryType = 'blob';
 
         ws.onmessage = async (ev) => {
             try {
-                // Không cần đọc header stream_id nữa
-                const imageBlob = ev.data;
-                const bitmap = await createImageBitmap(imageBlob);
+                // Dữ liệu nhận về là một chuỗi JSON
+                const data = JSON.parse(ev.data);
 
-                if (ctx.canvas.width !== bitmap.width || ctx.canvas.height !== bitmap.height) {
-                    ctx.canvas.width = bitmap.width;
-                    ctx.canvas.height = bitmap.height;
+                // 1. Cập nhật số đếm
+                const countDisplay = document.getElementById('count_display_' + data.stream_id);
+                if (countDisplay) {
+                    countDisplay.innerText = `Stream ${data.stream_id}: ${data.count}`;
                 }
-                ctx.drawImage(bitmap, 0, 0);
-                bitmap.close();
+
+                // 2. Vẽ hình ảnh từ chuỗi base64
+                const image = new Image();
+                image.onload = () => {
+                    if (ctx.canvas.width !== image.width || ctx.canvas.height !== image.height) {
+                        ctx.canvas.width = image.width;
+                        ctx.canvas.height = image.height;
+                    }
+                    ctx.drawImage(image, 0, 0);
+                };
+                image.src = 'data:image/jpeg;base64,' + data.image;
+
             } catch (e) {
-                if (!(e instanceof DOMException)) {
-                     console.error(`Error processing frame for stream ${stream_id}:`, e);
-                }
+                console.error('Error processing message:', e);
             }
         };
 

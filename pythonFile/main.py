@@ -11,6 +11,7 @@ import asyncio
 import threading
 import queue
 import uvicorn
+import base64
 import json
 from collections import deque
 from datetime import datetime
@@ -46,14 +47,14 @@ CONFIG = {
     'CLASS_ID': 1,  # ID của lớp 'stamp'
 
     # Geometry / Preprocess
-    'RESIZE_PERCENT': 50,
+    'RESIZE_PERCENT': 40,
 
     # Counting Logic
-    'MOVE_THRESHOLD': 5,
-    'MIN_LIFETIME': 3,
+    'MOVE_THRESHOLD': 3,
+    'MIN_LIFETIME': 2,
 
     # Tracking
-    'LOST_TRACK_BUFFER': 100,
+    'LOST_TRACK_BUFFER': 150,
 
     # Db batching
     'BATCH_SIZE': 6,
@@ -69,7 +70,7 @@ CONFIG = {
 
     # Streaming
     'SEND_BINARY': True,
-    'JPEG_QUALITY': 70,
+    'JPEG_QUALITY': 60,
 }
 
 # ====================== LOGGING ======================
@@ -239,7 +240,6 @@ class VideoProcessor:
         
         # Luôn vẽ đường kẻ và số đếm trước
         cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 1)
-        cv2.putText(frame, f'Stream {self.stream_id}: {self.total_count}', (int(w / 20), int(h / 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 1)
 
         if tracked_detections is None:
             return frame # Nếu không có gì để vẽ, trả về frame đã vẽ text
@@ -354,30 +354,47 @@ async def shutdown_event():
 app.mount("/static", StaticFiles(directory="./static"), name="static")
 
 # HTML giao diện với nhiều video
+# 1. Định nghĩa chuỗi HTML với các thẻ style và cấu trúc cơ bản
 HTML = """
 <!doctype html>
 <html>
-<head><meta charset='utf-8'><title>RTSP Streams</title>
-<style>
-    body{background:#111;color:#eee;font-family:sans-serif;}
-    .video-container{display:flex;justify-content:center;flex-wrap:wrap;}
-    .video{display:block;margin:10px;width:auto;height:auto;object-fit:contain;max-width:none;border:1px solid #444;}
-    canvas { display: block; width: auto; height: auto; image-rendering: pixelated; }
-</style>
+<head>
+    <meta charset='utf-8'>
+    <title>RTSP Streams</title>
+    <style>
+        body{background:#111;color:#eee;font-family:sans-serif;}
+        .video-container{display:flex;justify-content:center;flex-wrap:wrap;}
+        .video{display:block;border:1px solid #444;}
+        canvas { display: block; width: auto; height: auto; image-rendering: pixelated; }
+        .stream-wrapper { text-align: center; margin: 10px; padding: 5px; border: 1px solid #333; border-radius: 5px;}
+        .count-display { color: #00FF00; font-size: 1.2em; font-weight: bold; margin-top: 5px;}
+    </style>
 </head>
 <body>
 <h2 style='text-align:center'>Multi-RTSP → YOLOv11n + ByteTrack</h2>
 <div class='video-container' data-stream-count='%d'>
-%s
+    %s
 </div>
 <script src='./static/main.js'></script>
 </body>
 </html>
-""" % (len(CONFIG['RTSP_URLS']), ''.join([f"<canvas id='video_stream_{i}' class='video'></canvas>" for i in range(len(CONFIG['RTSP_URLS']))]))
+"""
+
+# 2. Tạo một chuỗi HTML con chứa tất cả các stream wrapper
+stream_html_content = ''.join([
+    f"""<div class="stream-wrapper">
+            <canvas id='video_stream_{i}' class='video'></canvas>
+            <div id='count_display_{i}' class='count-display'>Stream {i}: --</div>
+        </div>"""
+    for i in range(len(CONFIG['RTSP_URLS']))
+])
+
+# 3. Điền chuỗi HTML con vào chuỗi HTML chính
+HTML_RESPONSE = HTML % (len(CONFIG['RTSP_URLS']), stream_html_content)
 
 @app.get('/')
 async def index():
-    return HTMLResponse(HTML)
+    return HTMLResponse(HTML_RESPONSE)
 
 @app.websocket('/ws/{stream_id}')
 async def ws_endpoint(ws: WebSocket, stream_id: int):
@@ -400,7 +417,6 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
                 # KIỂM TRA XẢ BATCH NGAY CẢ KHI KHÔNG CÓ FRAME MỚI
                 if time.time() - last_flush_time > FLUSH_INTERVAL and batch_to_db:
                     db_queue.put((processor.stream_id, batch_to_db.copy()))
-                    logger.info(f"Stream {stream_id}: Flushing {len(batch_to_db)} items to DB by timeout. DB queue size = {db_queue.qsize()}")
                     batch_to_db.clear()
                     last_flush_time = time.time()
 
@@ -419,9 +435,7 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
                 if new_detections:
                     batch_to_db.extend(new_detections)
             else:
-                processed_frame = await run_in_threadpool(
-                    processor.draw_detections, frame, processor.last_tracked_detections
-                )
+                processed_frame = processor.draw_detections(frame, processor.last_tracked_detections)
 
             # KIỂM TRA VÀ GỬI BATCH ĐẾN DB VỚI LOGIC MỚI
             time_since_flush = time.time() - last_flush_time
@@ -434,7 +448,6 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
             if is_batch_full or is_timeout:
                 reason = "full batch" if is_batch_full else "timeout"
                 db_queue.put((processor.stream_id, batch_to_db.copy()))
-                logger.info(f"Stream {stream_id}: Flushing {len(batch_to_db)} items to DB by {reason}. DB queue size = {db_queue.qsize()}")
                 batch_to_db.clear()
                 last_flush_time = time.time()
 
@@ -442,7 +455,18 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
             if processed_frame is not None:
                 ok, buf = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), CONFIG['JPEG_QUALITY']])
                 if ok:
-                    await ws.send_bytes(buf.tobytes())
+                    # Mã hóa ảnh thành Base64
+                    base64_image = base64.b64encode(buf).decode('utf-8')
+
+                    # Tạo gói dữ liệu JSON
+                    message = {
+                        'image': base64_image,
+                        'count': processor.total_count,
+                        'stream_id': processor.stream_id # Gửi lại stream_id để JS biết
+                    }
+
+                    # Gửi đi dưới dạng text
+                    await ws.send_text(json.dumps(message))
                 else:
                     logger.error(f"Failed to encode frame for stream {processor.stream_id}")
 
@@ -456,7 +480,6 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
         processor.set_web_status(False)
         if len(batch_to_db) != 0:
             db_queue.put((processor.stream_id, batch_to_db.copy()))
-            logger.info(f"Stream {stream_id}: Flushing remaining {len(batch_to_db)} items before closing.")
             batch_to_db.clear()
         logger.info(f"WebSocket connection for stream {processor.stream_id} closed.")
 
