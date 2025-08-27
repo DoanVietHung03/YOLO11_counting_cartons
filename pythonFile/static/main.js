@@ -1,39 +1,3 @@
-// const ws = new WebSocket('ws://' + location.host + '/ws');
-// ws.binaryType = 'blob';
-// ws.onmessage = (ev) => {
-//     if (ev.data instanceof Blob) {
-//         const reader = new FileReader();
-//         reader.onload = () => {
-//             try {
-//                 // Tìm vị trí của dấu phân cách "|"
-//                 const separatorIndex = reader.result.indexOf('|');
-//                 if (separatorIndex === -1) {
-//                     console.error('No separator found in WebSocket data');
-//                     return;
-//                 }
-//                 // Tách metadata và frame
-//                 const metadataStr = reader.result.slice(0, separatorIndex);
-//                 const frameData = ev.data.slice(separatorIndex + 1);
-//                 const data = JSON.parse(metadataStr);
-//                 const img = document.getElementById('video_stream_' + data.stream_id);
-//                 if (img) {
-//                     const url = URL.createObjectURL(frameData);
-//                     img.onload = () => URL.revokeObjectURL(url);
-//                     img.src = url;
-//                 } else {
-//                     console.error('Image element not found for stream_id: ' + data.stream_id);
-//                 }
-//             } catch (e) {
-//                 console.error('Error processing WebSocket data:', e);
-//             }
-//         };
-//         reader.readAsText(new Blob([ev.data.slice(0, 400)])); // Tăng kích thước để đảm bảo đọc hết metadata
-//     }
-// };
-// ws.onerror = (e) => console.error('WebSocket error:', e);
-// ws.onclose = () => console.log('WebSocket closed');
-
-// Thêm một "lớp vỏ" sự kiện bên ngoài toàn bộ code
 document.addEventListener('DOMContentLoaded', function() {
 
     // --- Toàn bộ code cũ của bạn nằm ở trong này ---
