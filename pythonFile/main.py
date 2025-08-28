@@ -47,14 +47,14 @@ CONFIG = {
     'CLASS_ID': 1,  # ID của lớp 'stamp'
 
     # Geometry / Preprocess
-    'RESIZE_PERCENT': 40,
+    'RESIZE_PERCENT': 50,
 
     # Counting Logic
     'MOVE_THRESHOLD': 3,
     'MIN_LIFETIME': 2,
 
     # Tracking
-    'LOST_TRACK_BUFFER': 150,
+    'LOST_TRACK_BUFFER': 200,
 
     # Db batching
     'BATCH_SIZE': 6,
@@ -70,7 +70,7 @@ CONFIG = {
 
     # Streaming
     'SEND_BINARY': True,
-    'JPEG_QUALITY': 60,
+    'JPEG_QUALITY': 70,
 }
 
 # ====================== LOGGING ======================
@@ -284,9 +284,6 @@ class VideoProcessor:
             to_del = [tid for tid, m in self.track_memory.items() if self.frame_idx - m['last_seen'] > self.config['LOST_TRACK_BUFFER'] * 2]
             for tid in to_del:
                 del self.track_memory[tid]
-
-            if self.frame_idx % 300 == 0: # Cứ mỗi 300 frame thì log một lần
-                logger.info(f"Stream {self.stream_id}: Track memory size = {len(self.track_memory)}")
 
         frame_with_drawings = self.draw_detections(frame, tracked)
 
