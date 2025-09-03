@@ -108,16 +108,12 @@ threading.Thread(target=db_worker, daemon=True).start()
 
 # ====================== VIDEO PROCESSOR CLASS ======================
 class VideoProcessor:
-    def __init__(self, config, stream_id):
+    def __init__(self, config, stream_id, shared_model: YOLO):
         self.config = config
         self.stream_id = stream_id
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f'Stream {stream_id} using device: {self.device}')
-        if self.device.type == 'cuda':
-            logger.info(f"GPU name: {torch.cuda.get_device_name(0)}")
 
         # Model
-        self.model = self._load_model()
+        self.model = shared_model
         self.class_names = self.model.model.names if hasattr(self.model.model, 'names') else getattr(self.model, 'names', {})
 
         # Tracker
@@ -148,19 +144,6 @@ class VideoProcessor:
             with self._lock: self._frame = frame
         def get(self):
             with self._lock: return None if self._frame is None else self._frame.copy()
-
-    def _load_model(self):
-        model = YOLO(self.config['MODEL_PATH']).to(self.device)
-        try:
-            model.fuse()
-            logger.info(f'Model layers fused for stream {self.stream_id}.')
-        except Exception: 
-            logger.warning(f'Failed to fuse model layers for stream {self.stream_id}. Continuing without fusion.')
-            pass
-        if self.device.type == 'cuda':
-            model.model.half()
-            logger.info(f'FP16 inference enabled for stream {self.stream_id}.')
-        return model
 
     def _probe_fps(self):
         cap = cv2.VideoCapture(self.config['RTSP_URLS'][self.stream_id], cv2.CAP_FFMPEG)
@@ -326,13 +309,28 @@ class VideoProcessor:
 
 # ====================== FASTAPI APP ======================
 app = FastAPI()
-import os
 max_workers = max(4, min(os.cpu_count() or 4, len(CONFIG['RTSP_URLS']) * 2))
 Executor = ThreadPoolExecutor(max_workers=max_workers)  # Tăng số worker để xử lý song song
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+if device.type == 'cuda':
+    logger.info(f"GPU name: {torch.cuda.get_device_name(0)}")
+    
+model = YOLO(CONFIG['MODEL_PATH']).to(device)
+try:
+    model.fuse()
+    logger.info(f'Model layers fused.')
+except Exception: 
+    logger.warning(f'Failed to fuse model layers. Continuing without fusion.')
+    pass
+if device.type == 'cuda':
+    model.model.half()
+    logger.info(f'FP16 inference enabled.')
+logger.info("Shared YOLO model loaded successfully.")
+    
 # Khởi tạo các VideoProcessor cho mỗi luồng
 video_processors = [
-    VideoProcessor(CONFIG, i)
+    VideoProcessor(CONFIG, i, model)
     for i, _ in enumerate(CONFIG['RTSP_URLS'])
 ]
 
