@@ -27,4 +27,5 @@ COPY . /test
 EXPOSE 8000
 
 # Khi container chạy, nó sẽ thực hiện lệnh này: python main.py. Tức là khởi động luôn FastAPI app của bạn.
-CMD ["python", "main.py"]
+# CMD ["python", "main.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
