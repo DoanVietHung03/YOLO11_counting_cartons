@@ -176,7 +176,7 @@ class VideoProcessor:
                 if self.config['RESIZE_PERCENT'] != 100:
                     h, w = frame.shape[:2]
                     nh, nw = int(h * self.config['RESIZE_PERCENT'] / 100), int(w * self.config['RESIZE_PERCENT'] / 100)
-                    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                    frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
                 try:
                     self.frame_buffer.put(frame)
                 except queue.Full:
@@ -216,27 +216,6 @@ class VideoProcessor:
                 self.frame_buffer._frame = None
             else:
                 self.frame_buffer.clear()
-    
-    # Đặt hàm này bên trong class VideoProcessor
-    def draw_detections(self, frame: cv2.Mat, tracked_detections):
-        h, w = frame.shape[:2]
-        
-        # Luôn vẽ đường kẻ và số đếm trước
-        cv2.line(frame, (w // 2, h // 6), (w // 2, h * 5 // 6), (0, 255, 255), 1)
-
-        if tracked_detections is None:
-            return frame # Nếu không có gì để vẽ, trả về frame đã vẽ text
-
-        # Vẽ các bounding box đã lưu
-        for i in range(len(tracked_detections)):
-            x1, y1, x2, y2 = map(int, tracked_detections.xyxy[i])
-            class_id = int(tracked_detections.class_id[i])
-            
-            # Chỉ vẽ box cho class ID đã định cấu hình
-            if class_id == self.config['CLASS_ID']:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                
-        return frame
 
     def process_and_draw_frame(self, frame: cv2.Mat):
         start_time = time.perf_counter()
@@ -263,15 +242,14 @@ class VideoProcessor:
                 
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 self._update_track_memory(track_id, cx, cy, class_id, confidence, w, h, batch_detections)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
 
             to_del = [tid for tid, m in self.track_memory.items() if self.frame_idx - m['last_seen'] > self.config['LOST_TRACK_BUFFER'] * 2]
             for tid in to_del:
                 del self.track_memory[tid]
 
-        frame_with_drawings = self.draw_detections(frame, tracked)
-
         processing_time = time.perf_counter() - start_time
-        return frame_with_drawings, batch_detections, processing_time
+        return frame, batch_detections, processing_time
 
     def _update_track_memory(self, track_id, cx, cy, class_id, confidence, w, h, batch_detections):
         m = self.track_memory.get(track_id)
@@ -430,7 +408,9 @@ async def ws_endpoint(ws: WebSocket, stream_id: int):
                 if new_detections:
                     batch_to_db.extend(new_detections)
             else:
-                processed_frame = processor.draw_detections(frame, processor.last_tracked_detections)
+                processed_frame, _, _ = await run_in_threadpool(
+                    processor.process_and_draw_frame, frame
+                )
 
             # KIỂM TRA VÀ GỬI BATCH ĐẾN DB VỚI LOGIC MỚI
             time_since_flush = time.time() - last_flush_time
