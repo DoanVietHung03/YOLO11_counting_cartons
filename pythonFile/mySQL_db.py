@@ -52,9 +52,7 @@ def initialize_database(stream_ids: list):
                         CREATE TABLE IF NOT EXISTS {table_name} (
                             id INT AUTO_INCREMENT PRIMARY KEY,
                             timestamp DATETIME,
-                            track_id INT,
-                            label VARCHAR(255),
-                            confidence FLOAT
+                            so_luong_tem INT
                         )
                     """)
                     logger.info(f"Table '{table_name}' ensured to exist.")
@@ -63,7 +61,8 @@ def initialize_database(stream_ids: list):
                     cur.execute(f"""
                         SELECT COUNT(*) 
                         FROM information_schema.statistics 
-                        WHERE table_name = '{table_name}' 
+                        WHERE table_schema = '{DB_CONFIG['database']}'
+                        AND table_name = '{table_name}' 
                         AND index_name = 'idx_timestamp'
                     """)
                     if cur.fetchone()[0] == 0:  # Chỉ mục chưa tồn tại
@@ -78,7 +77,7 @@ def initialize_database(stream_ids: list):
 
 def db_insert(detections_list: list, stream_id):
     """
-    Hàm insert một loạt detections vào bảng tương ứng với stream_id.
+    Hàm insert thông tin tóm tắt của một batch vào bảng tương ứng.
     Sử dụng connection pool để quản lý kết nối hiệu quả.
     Thread-safe và tối ưu cho đa luồng.
     """
@@ -89,13 +88,11 @@ def db_insert(detections_list: list, stream_id):
     table_name = f"detections_stream_{stream_id}"
     
     # Chuyển đổi dữ liệu sang dạng tuple để dùng executemany
-    sql = f"INSERT INTO {table_name} (timestamp, track_id, label, confidence) VALUES (%s, %s, %s, %s)"
+    sql = f"INSERT INTO {table_name} (timestamp, so_luong_tem) VALUES (%s, %s)"
     data_to_insert = [
         (
             det["timestamp"],
-            det["track_id"],
-            det["label"],
-            det["confidence"]
+            det["so_luong_tem"]
         )
         for det in detections_list
     ]
